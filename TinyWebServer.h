@@ -12,7 +12,7 @@
 
 #include <Print.h>
 
-class SdFile;
+// class SdFile;
 class TinyWebServer;
 
 namespace TinyWebPutHandler {
@@ -31,6 +31,43 @@ namespace TinyWebPutHandler {
   // function to handle the characters of the uploaded function.
   boolean put_handler(TinyWebServer& web_server);
   extern HandlerFn put_handler_fn;
+};
+
+
+
+// added to support forms and cgi
+namespace TinyWebFormHandler {
+
+ 
+
+ typedef boolean (*FormHandlerFn)(TinyWebServer& web_server,
+              char* buffer, int size);
+
+ typedef boolean (*cgiHandlerFn)(TinyWebServer& web_server);
+
+ typedef struct {
+    const char*   form_name;
+    FormHandlerFn   handler;
+  } FormList;
+
+  typedef struct {
+    const char*   cgi_name;
+    cgiHandlerFn  cgihandler;
+  } cgiList;
+
+  // An HTTP handler that knows how to handle forms using the GET
+  // method. Set the `form_handler_fn' variable below to your own
+  // function to handle the characters of the form function.
+  void set_form_handler(FormList *handler);
+  bool add_form_keyword(char *keyword);
+  void list_keywords(void);
+  char *get_cgi_post_name_uri(const char* path, const char* root);
+  char *get_var_from_post_data(char* pdata, const char* var);
+  boolean form_handler(TinyWebServer& web_server);
+  boolean cgi_handler(TinyWebServer& web_server);
+  extern FormList *form_handler_list_ptr;
+  extern cgiList *cgi_handler_list_ptr;
+
 };
 
 class TinyWebServer : public Print {
@@ -126,6 +163,9 @@ public:
   // The returned string must be free()d by the caller.
   static char* get_file_from_path(const char* path);
 
+  // The returned string must be free()d by the caller.
+  static char* get_var_from_uri(const char* path, const char* var);
+
   // Guesses a MIME type based on the extension of `filename'. If none
   // could be guessed, the equivalent of text/html is returned.
   static MimeType get_mime_type_from_filename(const char* filename);
@@ -135,7 +175,7 @@ public:
   //
   // This is mainly an optimization to reuse the internal static
   // buffer used by this class, which saves us some RAM.
-  void send_file(SdFile& file);
+  void send_file(File& file);
 
   // These methods write directly in the response stream of the
   // connected client

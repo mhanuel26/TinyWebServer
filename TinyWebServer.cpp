@@ -38,11 +38,17 @@ extern "C" {
 #include <Ethernet.h>
 #include <Flash.h>
 // #include <SD.h>
+#include <SDHCI.h>
 
 #include "TinyWebServer.h"
 
+#define WIZSSIZE 4096
+
 // Temporary buffer.
-static char buffer[160];
+#define BUFFER_SIZE   2048
+static char buffer[WIZSSIZE];
+static char obuffer[BUFFER_SIZE];
+static char linebuf[BUFFER_SIZE];
 
 FLASH_STRING(mime_types,
   "HTM*text/html|"
@@ -128,6 +134,7 @@ boolean TinyWebServer::process_headers() {
   int pos;
   const char* header;
   uint32_t start_time = millis();
+
   while (1) {
     if (should_stop_processing()) {
       return false;
@@ -138,85 +145,86 @@ boolean TinyWebServer::process_headers() {
     if (!read_next_char(client_, (uint8_t*)&ch)) {
       continue;
     }
+
     start_time = millis();
 #if DEBUG
     Serial.print(ch);
 #endif
     switch (state) {
-    case START_LINE:
-      if (ch == '\r') {
-	break;
-      } else if (ch == '\n') {
-	state = END_HEADERS;
-      } else if (isalnum(ch) || ch == '-') {
-	pos = 0;
-	buffer[pos++] = ch;
-	state = HEADER_NAME;
-      } else {
-	state = ERROR;
-      }
-      break;
+      case START_LINE:
+        if (ch == '\r') {
+          break;
+        } else if (ch == '\n') {
+          state = END_HEADERS;
+        } else if (isalnum(ch) || ch == '-') {
+          pos = 0;
+          buffer[pos++] = ch;
+          state = HEADER_NAME;
+        } else {
+          state = ERROR;
+        }
+        break;
 
-    case HEADER_NAME:
-      if (pos + 1 >= sizeof(buffer)) {
-	state = ERROR;
-	break;
-      }
-      if (ch == ':') {
-	buffer[pos] = 0;
-	header = buffer;
-	if (is_requested_header(&header)) {
-	  state = HEADER_VALUE_SKIP_INITIAL_SPACES;
-	} else {
-	  state = HEADER_IGNORE_VALUE;
-	}
-	pos = 0;
-      } else if (isalnum(ch) || ch == '-') {
-	buffer[pos++] = ch;
-      } else {
-	state = ERROR;
-	break;
-      }
-      break;
+      case HEADER_NAME:
+        if (pos + 1 >= sizeof(buffer)) {
+          state = ERROR;
+          break;
+        }
+        if (ch == ':') {
+          buffer[pos] = 0;
+          header = buffer;
+        	if (is_requested_header(&header)) {
+        	  state = HEADER_VALUE_SKIP_INITIAL_SPACES;
+        	} else {
+        	  state = HEADER_IGNORE_VALUE;
+        	}
+        	pos = 0;
+        } else if (isalnum(ch) || ch == '-') {
+        	buffer[pos++] = ch;
+        } else {
+        	state = ERROR;
+          break;
+        }
+        break;
 
-    case HEADER_VALUE_SKIP_INITIAL_SPACES:
-      if (pos + 1 >= sizeof(buffer)) {
-	state = ERROR;
-	break;
-      }
-      if (ch != ' ') {
-	buffer[pos++] = ch;
-	state = HEADER_VALUE;
-      }
-      break;
+      case HEADER_VALUE_SKIP_INITIAL_SPACES:
+        if (pos + 1 >= sizeof(buffer)) {
+          state = ERROR;
+          break;
+        }
+        if (ch != ' ') {
+          buffer[pos++] = ch;
+          state = HEADER_VALUE;
+        }
+        break;
 
-    case HEADER_VALUE:
-      if (pos + 1 >= sizeof(buffer)) {
-	state = ERROR;
-	break;
-      }
-      if (ch == '\n') {
-	buffer[pos] = 0;
-	if (!assign_header_value(header, buffer)) {
-	  state = ERROR;
-	  break;
-	}
-	state = START_LINE;
-      } else {
-	if (ch != '\r') {
-	  buffer[pos++] = ch;
-	}
-      }
-      break;
+      case HEADER_VALUE:
+        if (pos + 1 >= sizeof(buffer)) {
+          state = ERROR;
+          break;
+        }
+        if (ch == '\n') {
+          buffer[pos] = 0;
+          if (!assign_header_value(header, buffer)) {
+            state = ERROR;
+            break;
+          }
+          state = START_LINE;
+        } else {
+          if (ch != '\r') {
+            buffer[pos++] = ch;
+          }
+        }
+        break;
 
-    case HEADER_IGNORE_VALUE:
-      if (ch == '\n') {
-	state = START_LINE;
-      }
-      break;
+      case HEADER_IGNORE_VALUE:
+        if (ch == '\n') {
+          state = START_LINE;
+        }
+        break;
 
-    default:
-      break;
+      default:
+        break;
     }
 
     if (state == END_HEADERS) {
@@ -230,11 +238,11 @@ boolean TinyWebServer::process_headers() {
 }
 
 void TinyWebServer::process() {
+  // 
   client_ = server_.available();
   if (!client_.connected() || !client_.available()) {
     return;
   }
-
   boolean is_complete = get_line(buffer, sizeof(buffer));
   if (!buffer[0]) {
     return;
@@ -263,7 +271,6 @@ void TinyWebServer::process() {
   }
   
   path_ = get_field(buffer, 1);
-
   // Process the headers.
   if (!process_headers()) {
     // Malformed header line.
@@ -271,7 +278,6 @@ void TinyWebServer::process() {
     client_.stop();
   }
   // Header processing finished. Identify the handler to call.
-
   boolean should_close = true;
   boolean found = false;
   for (int i = 0; handlers_[i].path; i++) {
@@ -457,6 +463,32 @@ char* TinyWebServer::get_file_from_path(const char* path) {
   return decoded;
 }
 
+char *TinyWebServer::get_var_from_uri(const char* path, const char* var) {
+
+  int len;
+  const char *p = strstr(path, var);
+  if(p != NULL){
+    const char* r = strchr(p, '=');
+    r++;
+    const char* r2 = strchr(r, '&');
+    if(r2 == NULL)
+      len = strlen(r);
+    else
+      len = (r2 - r);
+    char* value = (char*)malloc_check(len + 1);
+    if (!value){
+      return NULL;
+    }
+    strncpy(value, r, len);
+    *(value+len)=0;
+    char* decoded = decode_url_encoded(value);
+    free(value);
+    return decoded;
+  }else{
+    return NULL;
+  }
+}
+
 TinyWebServer::MimeType TinyWebServer::get_mime_type_from_filename(
     const char* filename) {
   MimeType r = text_html_content_type;
@@ -496,7 +528,7 @@ TinyWebServer::MimeType TinyWebServer::get_mime_type_from_filename(
   return r;
 }
 
-void TinyWebServer::send_file(SdFile& file) {
+void TinyWebServer::send_file(File& file) {
   size_t size;
   while ((size = file.read(buffer, sizeof(buffer))) > 0) {
     if (!client_.connected()) {
@@ -660,3 +692,229 @@ boolean put_handler(TinyWebServer& web_server) {
 }
 
 };
+
+
+// The FORM handler
+
+namespace TinyWebFormHandler {
+
+FormList *form_handler_list_ptr;
+cgiList *cgi_handler_list_ptr;
+char *form_keywords[10] = {NULL};
+
+void set_form_handler(FormList *handler){
+  form_handler_list_ptr = handler;
+}
+
+
+bool add_form_keyword(char *keyword){
+  int len = strlen(keyword);
+  char* value = (char*)malloc_check(len + 1);
+  if (!value){
+    return false;
+  }
+  strncpy(value, keyword, len);
+  *(value+len)=0;
+  for(int i=0; i < sizeof(form_keywords); i++){
+    if(form_keywords[i] == NULL){
+      form_keywords[i] = value;   // store the keyword
+      #if DEBUG
+      Serial.printf("Added keyword: %s to position %d\n\r", form_keywords[i], i);
+      #endif
+      return true;
+    }
+  }
+  #if DEBUG
+  Serial.println("ERROR - Increase the Keyword Array size");
+  #endif
+  return false;
+}
+
+void list_keywords(void){
+  #if DEBUG
+  for(int i=0; i < sizeof(form_keywords); i++){
+    if(form_keywords[i] == NULL){
+      Serial.println("No more keywords");
+      break;
+    }
+    Serial.printf("Found keyword: %s at index %d\n\r", form_keywords[i], i);
+  }
+  #endif
+}
+
+// Fills in `buffer' by reading up to `num_bytes'.
+// Returns the number of characters read.
+int read_chars(TinyWebServer& web_server, Client& client,
+               uint8_t* buffer, int size) {
+  uint8_t ch;
+  int pos;
+  for (pos = 0; pos < size && web_server.read_next_char(client, &ch); pos++) {
+    buffer[pos] = ch;
+  }
+  return pos;
+}
+
+char *get_form_name_uri(const char* path, const char* root) {   // root should be like: /submitform or submitform/form1 or submitform
+
+  int len;
+  char *p = strstr(path, root);
+  if(p == NULL)
+    return NULL;
+  const char* r = strchr(p, '/');
+  if(r == NULL)
+    return((char*)root);
+  r++;
+  const char* r2 = strchr(r, '?');
+  if(r2 == NULL)
+    return NULL;
+  len = (r2 - r);
+  if(!len){
+    return NULL;
+  }
+  char* value = (char*)malloc_check(len + 1);
+  if (!value){
+    return NULL;
+  }
+  strncpy(value, r, len);
+  *(value+len)=0;
+  return value;
+}
+
+char *get_var_from_post_data(char* pdata, const char* var) { return TinyWebServer::get_var_from_uri((const char*)pdata, var);}
+
+// FORM POST
+boolean form_handler(TinyWebServer& web_server) {
+  if(form_handler_list_ptr == NULL){
+    #if DEBUG
+      Serial.print("Form Handler List not defined (NULL)");
+    #endif
+    return false;
+  }
+  FormList *s = form_handler_list_ptr;
+  char *form_ = NULL;
+  const char* length_str = web_server.get_header_value("Content-Length");
+  unsigned int length = atol(length_str);
+  int16_t size;
+  EthernetClient client = web_server.get_client();
+
+  if(length < 512 && client.connected()) {
+    memset(obuffer, 0, sizeof(obuffer));
+    size = read_chars(web_server, client, (uint8_t*)obuffer, 512);
+  }else{
+    web_server.send_error_code(413);    // Payload Too Large, length not allowed for a POST
+    web_server.end_headers();
+  }
+#if DEBUG
+  Serial.print("testing the get_path function: ");
+  Serial.println(web_server.get_path());
+#endif
+  bool keyword_match = false;
+  for(int i=0; i < sizeof(form_keywords); i++){
+    if(form_keywords[i] == NULL)
+      break;
+    #if DEBUG
+    Serial.printf("Check against keyword: %s at index: %d\n\r", form_keywords[i], i);
+    Serial.printf("path: %s\n\r", web_server.get_path());
+    #endif
+    form_ = get_cgi_post_name_uri(web_server.get_path(), form_keywords[i]);
+    if(form_ == NULL){
+      #if DEBUG
+      Serial.printf("form_ is NULL\n\r");
+      #endif
+      continue;
+    }else{
+      keyword_match = true;
+      #if DEBUG
+      Serial.printf("form_ : %s\n\r", form_);
+      #endif
+      break;    // keyword match
+    }
+  }
+  if(!keyword_match){
+    #if DEBUG
+    Serial.println("No keyboard match");
+    #endif
+    if(form_ != NULL)
+      free(form_);
+    return false;     // no keyword 
+  }
+    
+  for(int i=0;s[i].form_name != NULL; i++){
+    if(!strcmp(s[i].form_name, form_)){
+  #if DEBUG
+      Serial.printf("form name: %s\n\r", s[i].form_name);
+  #endif
+      (*(s[i].handler))(web_server, obuffer, size);
+      free(form_);
+      return true;
+    }
+  }
+#if DEBUG
+  Serial.printf("No method available in Form");
+#endif
+  if(form_ != NULL){
+    free(form_);
+  }
+  return false;
+}
+
+char *get_cgi_post_name_uri(const char* path, const char* root) {   // root should be like: /submitform or submitform/form1 or submitform
+  int len;
+  char *p = strstr(path, root);
+  if(p == NULL)
+    return NULL;
+  const char* r = strchr(p, '/');
+  if(r == NULL){
+    len = strlen(root);
+    char* value = (char*)malloc_check(len + 1);
+    strncpy(value, root, len);
+    *(value+len)=0;
+    if (!value){
+      return NULL;
+    }
+    return value;
+  }
+  r++;
+  len = strlen(r);
+  if(len > 0){
+    char* value = (char*)malloc_check(len + 1);
+    if (!value){
+      return NULL;
+    }
+    strncpy(value, r, len);
+    *(value+len)=0;
+    return value;
+  }else{
+    return NULL;
+  }
+}
+
+boolean cgi_handler(TinyWebServer& web_server) {
+  cgiList *cgi = cgi_handler_list_ptr;
+  char *path_ = NULL;
+#if DEBUG
+  Serial.println("cgi_handler");
+  Serial.println("testing the get_path function");
+  Serial.println(web_server.get_path());
+  Serial.println("testing the get_cgi_name function");
+  path_ = get_cgi_post_name_uri(web_server.get_path(), "intercom_cgi");
+#endif
+   for(;cgi != NULL; cgi++){
+  if(!strcmp(cgi->cgi_name, path_)){
+#if DEBUG
+    Serial.print("calling form method for: ");
+    Serial.println(cgi->cgi_name);
+#endif
+    (*(cgi->cgihandler))(web_server);
+    free(path_);
+    return true;
+  }
+  }
+#if DEBUG
+  Serial.println("No method available for this CGI");
+#endif
+  free(path_);
+  return false;
+}
+
+};    // end of TinyWebFormHandler namespace
